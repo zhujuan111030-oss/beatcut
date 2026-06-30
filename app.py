@@ -9,6 +9,7 @@ import tempfile
 from pathlib import Path
 
 import streamlit as st
+from moviepy import VideoFileClip, concatenate_videoclips
 
 from beatcut.video_editor import create_beat_video
 from beatcut.effects import EFFECT_PRESETS
@@ -60,13 +61,14 @@ col1, col2 = st.columns(2)
 with col1:
     st.subheader("📹 上传视频")
     video_files = st.file_uploader(
-        "选择视频文件（支持多选）",
+        "选择视频文件（支持多选，将合并为一段）",
         type=["mp4", "mov", "avi", "mkv", "webm"],
         accept_multiple_files=True,
         key="video",
     )
     if video_files:
-        st.caption(f"已选择 {len(video_files)} 个视频")
+        if len(video_files) > 1:
+            st.caption(f"已选择 {len(video_files)} 个视频，将按顺序合并")
         for vf in video_files:
             with st.expander(f"🎬 {vf.name}", expanded=(len(video_files) == 1)):
                 st.video(vf)
@@ -125,69 +127,70 @@ if video_files:
                 with open(audio_path, "wb") as f:
                     f.write(audio_file.read())
 
-            results = []
-            total = len(video_files)
-
-            for idx, video_file in enumerate(video_files):
-                st.subheader(f"🎬 处理中 ({idx + 1}/{total}): {video_file.name}")
-
-                video_path = os.path.join(tmpdir, f"input_video_{idx}{Path(video_file.name).suffix}")
-                with open(video_path, "wb") as f:
-                    f.write(video_file.read())
-
-                output_path = os.path.join(tmpdir, f"output_beatcut_{idx}.mp4")
-
-                progress_bar = st.progress(0, "分析节拍中...")
+            # ---- Step 1: Merge videos if multiple ----
+            if len(video_files) > 1:
                 status_text = st.empty()
+                status_text.info(f"正在合并 {len(video_files)} 个视频...")
+                merge_clips = []
+                for vf in video_files:
+                    tmp_path = os.path.join(tmpdir, vf.name)
+                    with open(tmp_path, "wb") as f:
+                        f.write(vf.read())
+                    clip = VideoFileClip(tmp_path)
+                    merge_clips.append(clip)
+                merged_clip = concatenate_videoclips(merge_clips)
+                video_path = os.path.join(tmpdir, "merged_video.mp4")
+                merged_clip.write_videofile(video_path, fps=30, codec="libx264", audio_codec="aac", logger=None)
+                for c in merge_clips:
+                    c.close()
+                merged_clip.close()
+                status_text.success(f"合并完成，总时长 {merged_clip.duration:.1f}s")
+            else:
+                video_path = os.path.join(tmpdir, video_files[0].name)
+                with open(video_path, "wb") as f:
+                    f.write(video_files[0].read())
 
-                def make_progress_callback(bar, status):
-                    def update(p):
-                        bar.progress(p, f"处理中... {int(p * 100)}%")
-                    return update
+            output_path = os.path.join(tmpdir, "output_beatcut.mp4")
 
-                update_progress = make_progress_callback(progress_bar, status_text)
+            progress_bar = st.progress(0, "分析节拍中...")
+            status_text = st.empty()
 
-                try:
-                    status_text.info("正在检测节拍...")
-                    result = create_beat_video(
-                        video_path=video_path,
-                        audio_path=audio_path,
-                        output_path=output_path,
-                        preset=preset,
-                        output_fps=fps,
-                        output_resolution=output_resolution,
-                        max_duration=max_duration,
-                        progress_callback=update_progress,
-                        keep_original_audio=keep_audio,
-                        trim_to_video=trim_to_video,
+            def update_progress(p):
+                progress_bar.progress(p, f"处理中... {int(p * 100)}%")
+
+            try:
+                status_text.info("正在检测节拍...")
+                result = create_beat_video(
+                    video_path=video_path,
+                    audio_path=audio_path,
+                    output_path=output_path,
+                    preset=preset,
+                    output_fps=fps,
+                    output_resolution=output_resolution,
+                    max_duration=max_duration,
+                    progress_callback=update_progress,
+                    keep_original_audio=keep_audio,
+                    trim_to_video=trim_to_video,
+                )
+
+                progress_bar.progress(1.0, "完成！")
+                status_text.success("✅ 生成成功！")
+
+                st.video(result)
+
+                with open(result, "rb") as f:
+                    st.download_button(
+                        label="⬇️ 下载视频",
+                        data=f,
+                        file_name=f"beatcut_{preset}.mp4",
+                        mime="video/mp4",
                     )
 
-                    progress_bar.progress(1.0, "完成！")
-                    status_text.success(f"✅ {video_file.name} 生成成功！")
-
-                    st.video(result)
-
-                    with open(result, "rb") as f:
-                        st.download_button(
-                            label=f"⬇️ 下载 {video_file.name}",
-                            data=f,
-                            file_name=f"beatcut_{preset}_{Path(video_file.name).stem}.mp4",
-                            mime="video/mp4",
-                            key=f"download_{idx}",
-                        )
-
-                    results.append(result)
-                    st.divider()
-
-                except Exception as e:
-                    status_text.error(f"❌ {video_file.name} 生成失败: {e}")
-                    st.exception(e)
-                    st.divider()
-
-            if results:
-                st.success(f"🎉 全部完成！共生成 {len(results)} 个视频")
+            except Exception as e:
+                status_text.error(f"❌ 生成失败: {e}")
+                st.exception(e)
 else:
-    st.info("👆 请先上传视频文件（支持多选）")
+    st.info("👆 请先上传视频文件（支持多选，多个视频将自动合并）")
 
 # ---- Footer ----
 st.divider()
